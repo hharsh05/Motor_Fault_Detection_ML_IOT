@@ -1,0 +1,5 @@
+Steps-
+1. run model.py
+2. run twin.py
+3. run app.py
+4. alert.py will be auto run , If you want to get whatsapp alert in your mobile yhen scan the QR code attached and change to phone no part of  code to yours
