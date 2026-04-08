@@ -1,77 +1,146 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import joblib
-import matplotlib.pyplot as plt
+import serial
+import time
+import numpy as np
 
-from twin import digital_twin
-from alert import send_whatsapp_alert
+# -------------------------------
+# 🔌 Serial Connection
+# -------------------------------
+@st.cache_resource
+def init_serial():
+    try:
+        ser = serial.Serial('COM3', 115200, timeout=1)
+        time.sleep(2)
+        return ser
+    except Exception as e:
+        st.error(f"Serial connection failed: {e}")
+        return None
 
-# Load ML model
+ser = init_serial()
+
+# -------------------------------
+# 📡 Read ESP32 Data
+# -------------------------------
+def read_esp32():
+    if ser is None:
+        return None
+
+    try:
+        if ser.in_waiting == 0:
+            return None
+
+        line = ser.readline().decode(errors='ignore').strip()
+
+        if not line:
+            return None
+
+        values = line.split(",")
+
+        # Expect 7 values from ESP32
+        if len(values) != 7:
+            return None
+
+        current = float(values[0])
+        rpm = float(values[1])
+        temp = float(values[2])
+        ax = float(values[3])
+        ay = float(values[4])
+        az = float(values[5])
+        pressure = float(values[6])
+
+        return current, rpm, temp, ax, ay, az, pressure
+
+    except:
+        return None
+
+# -------------------------------
+# 🤖 Load ML Model
+# -------------------------------
 model = joblib.load("motor_model.pkl")
 
-st.title("⚡ EV Motor Digital Twin + ML Health Monitoring")
+# -------------------------------
+# 🖥️ UI
+# -------------------------------
+st.title("⚡ EV Motor Health Monitoring (Live Dashboard)")
 
-# --- Sidebar Parameters (Datasheet) ---
-st.sidebar.header("Motor Parameters")
-R = st.sidebar.slider("Resistance (Ohm)", 0.1, 5.0, 1.0)
-Ke = st.sidebar.slider("Back EMF (Ke)", 0.01, 1.0, 0.1)
-Kt = st.sidebar.slider("Torque Constant (Kt)", 0.01, 1.0, 0.1)
-B = st.sidebar.slider("Friction Coefficient", 0.001, 0.1, 0.01)
+placeholder = st.empty()
 
-# --- Inputs (simulate IoT) ---
-st.header("📡 Live Motor Inputs")
-V = st.slider("Voltage", 0, 100, 48)
-load_torque = st.slider("Load Torque", 0.0, 10.0, 2.0)
+# -------------------------------
+# 🔄 Read Data
+# -------------------------------
+data = read_esp32()
 
-# Digital Twin
-twin_output = digital_twin(V, R, Ke, Kt, B, load_torque)
+if data is None:
+    placeholder.warning("⚠️ Waiting for ESP32 data...")
+    st.stop()
 
-# Extract values
-omega = twin_output["speed"]
-current = twin_output["current"]
-torque = twin_output["torque"]
-efficiency = twin_output["efficiency"]
+current, rpm, temp, ax, ay, az, pressure = data
 
-# Debug (optional)
-#st.write(type(torque))  # should be float
+# -------------------------------
+# ⚙️ Derived Calculations
+# -------------------------------
+omega = rpm / 9.55  # RPM → rad/s
 
-# ML input
+Kt = 0.1
+torque = Kt * current
+
+efficiency = (torque * omega) / (current * rpm + 1e-6)
+
+# Correct vibration magnitude
+vibration = np.sqrt(ax**2 + ay**2 + az**2)
+
+# -------------------------------
+# 📊 Display Data
+# -------------------------------
+with placeholder.container():
+
+    st.subheader("📡 Live Sensor Data")
+
+    st.write({
+        "Current (A)": current,
+        "RPM": rpm,
+        "Temperature (°C)": temp,
+        "Ax": ax,
+        "Ay": ay,
+        "Az": az,
+        "Pressure (PSI)": pressure,
+        "Vibration": vibration
+    })
+
+    st.subheader("🧠 Digital Twin Output")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Speed (rad/s)", f"{omega:.2f}")
+    col2.metric("Torque (Nm)", f"{torque:.2f}")
+    col3.metric("Efficiency", f"{efficiency:.2f}")
+    col4.metric("RPM", f"{rpm:.0f}")
+
+# -------------------------------
+# 🤖 ML Prediction
+# -------------------------------
 input_data = pd.DataFrame([{
-    "Ambient Temp (°C)": 30,
+    "Ambient Temp (°C)": temp,
     "Current (A)": current,
     "Humidity (%)": 50,
-    "Motor Speed (RPM)": omega * 9.55,
-    "Temperature (°C)": 40,
-    "Voltage (V)": V,
-    "Vibration (g)": abs(torque) * 0.05
+    "Motor Speed (RPM)": rpm,
+    "Temperature (°C)": temp,
+    "Voltage (V)": 12,  # placeholder (since ESP32 not sending voltage)
+    "Vibration (g)": vibration
 }])
+
+# Align with model features
 input_data = input_data.reindex(columns=model.feature_names_in_, fill_value=0)
 input_data = input_data.astype(float)
 
 prediction = model.predict(input_data)[0]
 
-st.subheader("🤖 ML Prediction")
-st.write(f"Motor Condition: {prediction}")
+st.subheader("🤖 Prediction")
+st.success(f"Motor Condition: {prediction}")
 
-# --- Alert System ---
-if prediction != "normal":
-    st.error("⚠️ Fault Detected!")
-
-    if st.button("Send WhatsApp Alert"):
-        sid = send_whatsapp_alert(f"ALERT! Motor Fault Detected: {prediction}")
-        st.success(f"Alert sent! SID: {sid}")
-
-# --- Visualization ---
-st.subheader("📈 Speed Response")
-
-time = np.linspace(0, 10, 100)
-speed_curve = twin_output["speed"] * (1 - np.exp(-time))
-
-fig, ax = plt.subplots()
-ax.plot(time, speed_curve)
-ax.set_xlabel("Time")
-ax.set_ylabel("Speed")
-ax.set_title("Motor Speed Response")
-
-st.pyplot(fig)
+# -------------------------------
+# 🔄 Auto Refresh
+# -------------------------------
+time.sleep(1)
+st.rerun()
